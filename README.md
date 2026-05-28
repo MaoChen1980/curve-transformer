@@ -224,6 +224,32 @@ gate = sigmoid(q)  # q 只依赖当前 token 的 embedding
 | 训练信号 | 双向，梯度更强 | 训练学的能力推理时用不上 |
 | 状态更新 | 简洁优雅 | 门控只看当前 token，表达力有限 |
 
+#### 从实用角度看
+
+以上是理论分析。从实用出发，这个思路有几个更直接的观察：
+
+**1. 如果状态 h 足够，KV cache 就是拐杖**
+
+标准 transformer 需要 KV cache 是因为架构没有显式记忆，每一步都回头看所有历史。如果固定大小的状态 h 能编码生成所需的上下文，那么 O(L) 的 KV cache 只是一个工程 hack，不是架构进步。这指向一个更深层的问题：**你真的需要记住所有过去才能生成下一个 token 吗？**
+
+**2. 大部分场景的瓶颈是局部一致，不是长上下文**
+
+- 对话 — 前后句连贯比记住 100 轮前的细节重要
+- 代码生成 — 函数内的逻辑一致比跨文件引用重要
+- 翻译 — 几句话内的术语统一比全文记忆重要
+- 写作辅助 — 段落流畅比全书结构重要
+
+长上下文是锦上添花，局部稳定是雪中送炭。**如果局部稳定能做到可靠，就已经覆盖了绝大多数实际需求。**
+
+**3. 大纲 + 章节 + 句子 — 认知的自然粒度**
+
+金庸写《天龙八部》也是先定章回大纲，再一章一章写。人类写作本就是分粒度的：
+- **大纲模式**：偶尔看全局，确认方向
+- **章节模式**：专注当前块，局部注意力
+- **句子模式**：逐句生成，依赖前几句的语境
+
+模型架构不需要每一层都做全局长注意力。它只需要在局部稳定生成，同时保留切换到大纲模式的能力。这和"局部为主，全局偶尔"的直觉完全一致。
+
 ---
 
 ### 项目文件
@@ -453,6 +479,33 @@ Training predicts the next token while attention sees the future. The attention 
 | Inference speed | O(1), independent of sequence length | h's capacity limits context |
 | Training signal | Bidirectional, stronger gradients | Learned patterns may not transfer |
 | State update | Simple, elegant | Gate ignores context, limited expressiveness |
+
+#### A Practical Perspective
+
+Beyond the theory, the architecture suggests several practical observations:
+
+**1. If state h is sufficient, KV cache is a crutch**
+
+Standard transformers need KV cache because the architecture has no explicit memory — every step must look back at the full history. If a fixed-size state h can encode the context needed for generation, then O(L) KV cache is an engineering hack, not an architectural advance. This raises a deeper question: **do you really need to remember everything to generate the next token?**
+
+**2. Most real-world bottlenecks are local coherence, not long context**
+
+- Dialogue — sentence-to-sentence flow matters more than 100-turn-old details
+- Code generation — function-level consistency matters more than cross-file references
+- Translation — term uniformity across a few sentences matters more than full-document memory
+- Writing — paragraph fluency matters more than book-length structure
+
+Long context is a nice-to-have; local stability is a must-have. **If local stability can be made reliable, it already covers the vast majority of practical needs.**
+
+**3. Outline + chapter + sentence — cognitive granularity**
+
+Jin Yong didn't write "The Demi-Gods and Semi-Devils" in one pass; he outlined chapters, then wrote one chapter at a time. Human writing is inherently hierarchical:
+
+- **Outline mode**: occasional global view to verify direction
+- **Chapter mode**: focused attention on the current block
+- **Sentence mode**: step-by-step generation, depending on recent context
+
+A model architecture doesn't need full global attention at every layer. It needs stable local generation with the ability to occasionally zoom out. This aligns with the intuition of "local first, global when needed."
 
 ---
 
