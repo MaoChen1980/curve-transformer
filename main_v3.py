@@ -5,90 +5,34 @@ Fixed: single unified dimension D throughout.
 Attention: D→D projections, multi-head, residual + norm + FFN
 No more E_in/E_out confusion.
 
-Key idea (from user):
-  1. Parallel training  ← PyTorch batches natively parallel
-  2. Bounded context   ← attention handles long range, but we cap context
-  3. Large corpus       ← 3000 sentences, varied templates
+Training data: REAL corpus from GPT2-distil-chinese (not synthetic templates).
 """
 
-import random, math, os, torch, torch.nn as nn, torch.nn.functional as F
+# USERNAME fix — MUST be set BEFORE any torch import.
+# Python 3.14 on Windows: torch._inductor needs getpass.getuser() which fails
+# if USERNAME/USER env vars are missing. Set both env vars here at module entry.
+import os, getpass
+os.environ.setdefault("USERNAME", "user")
+os.environ.setdefault("USER", "user")
 
+import random, math, torch, torch.nn as nn, torch.nn.functional as F
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. Data
+# 1. Data — load REAL corpus from GPT2-distil-chinese
 # ══════════════════════════════════════════════════════════════════════════════
-SUBJECTS = ["我","你","他","她","它","我们","你们","他们",
-    "春天","夏天","秋天","冬天","天空","大地","海洋","山川",
-    "时间","空间","宇宙","银河","地球","月亮","太阳","星星",
-    "森林","草原","沙漠","河流","湖泊","大海","山顶","平原",
-    "科学家","艺术家","作家","音乐家","画家","老师","医生",
-    "孩子","老人","青年","少年","女孩","男孩","朋友","家人",
-    "人工智能","机器人","量子计算机","5G网络","区块链","云计算"]
-PREDICATES = ["是","有","在","爱","喜欢","想要","需要","知道","认为",
-    "看见","听见","感觉","记得","想象","创造","发现",
-    "发展","改变","成长","学习","探索","追求","实现","完成",
-    "感受","理解","表达","记录","保护","建设","改进","提升","突破",
-    "照耀","滋润","养育","陪伴","支持","帮助",
-    "唱歌","跳舞","绘画","写作","旅行","阅读","思考"]
-OBJECTS = ["世界上","时间里","宇宙中","大自然","社会中","历史上",
-    "和平","自由","希望","梦想","知识","智慧","爱情","友情",
-    "亲情","健康","财富","幸福","快乐","美丽","真理","正义",
-    "科技","艺术","文化","教育","经济","政治","环境","资源",
-    "天空","大地","海洋","山川","森林","草原","沙漠","河流",
-    "阳光","月光","星光","书","音乐","电影","画","诗","歌",
-    "家","城市","村庄","国家","学校","公园","图书馆",
-    "今天","明天","昨天","现在","过去","未来"]
-MODIFIERS = ["非常","特别","十分","真的","确实","当然",
-    "慢慢地","静静地","轻轻地","悄悄地","渐渐地"]
-TEMPLATES = [
-    "{S}在{O}","{S}是{O}","{S}有{O}","{S}爱{O}","{S}喜欢{O}",
-    "{S}需要{O}","{S}知道{O}","{S}想要{O}","{S}认为{O}","{S}创造{O}",
-    "{M}{S}是{O}","{S}和{S}在{O}","{S}与{S}一起{O}",
-    "关于{S}的{O}","{M}的{O}是{S}",
-    "{S}说{O}","{S}看{O}","{S}听{O}","{S}感到{O}",
-    "{S}正在{O}","{S}已经{O}","{S}将要{O}"]
+CORPUS_FILE = "E:/claude/myllm/real_corpus.txt"
+with open(CORPUS_FILE, 'r', encoding='utf-8') as f:
+    REAL_CORPUS = [line.strip() for line in f if line.strip()]
 
-def gen_corpus(n=3000):
-    out = []
-    for _ in range(n):
-        t = random.choice(TEMPLATES)
-        s = (t.replace("{S}", random.choice(SUBJECTS))
-              .replace("{O}", random.choice(OBJECTS))
-              .replace("{M}", random.choice(MODIFIERS)))
-        if 4 <= len(s) <= 16 and s not in out:
-            out.append(s)
-    out += [
-        "今天天气真好","我想去看看外面的世界","风吹过来很凉爽",
-        "星星在天上闪烁","河水向东流去","春天来了花开了",
-        "你是我最重要的人","每天都要保持微笑",
-        "阳光照在窗台上","雨后的空气清新",
-        "我爱自然和自由","夜晚的城市灯火通明",
-        "鸟儿在枝头唱歌","山很高云很白",
-        "海浪拍打着沙滩","月光洒在湖面上",
-        "未来充满希望","梦想就在前方",
-        "努力就会有收获","坚持就是胜利",
-        "勇敢面对困难","世界很大很美好",
-        "知识就是力量","时间是宝贵的",
-        "健康是最大的财富","友情珍贵难得",
-        "爱情让人成长","亲情温暖人心",
-        "音乐让人放松","读书让人明智",
-        "旅行让人开阔","绘画表达情感",
-        "诗歌抒发心意","人工智能改变世界",
-        "量子计算突破","网络安全重要",
-        "爱是最美的语言","家是最温暖的港湾",
-        "朋友是一面镜子","微笑是最好的名片",
-        "学习改变命运","感恩让人幸福",
-        "世界因你而精彩","珍惜当下的每一刻",
-    ]
-    return list(set(out))
-
-CORPUS = gen_corpus(3000)
-random.shuffle(CORPUS)
+# Use real corpus directly (no template substitution)
+CORPUS = REAL_CORPUS
 
 chars = set("".join(CORPUS))
 c2i = {"<PAD>":0,"<UNK>":1}
 for c in sorted(chars): c2i[c] = len(c2i)
 i2c = {v:k for k,v in c2i.items()}
-VOCAB, MAXLEN = len(c2i), 20
+MAXLEN = max(len(s) for s in CORPUS)
+VOCAB = len(c2i)
+print(f"Corpus: {len(CORPUS)} sentences, max_len={MAXLEN}")
 
 def enc(s):
     t = [c2i.get(c,1) for c in s]
@@ -193,11 +137,16 @@ class CurveTransformer(nn.Module):
         return torch.zeros(B, self.blocks[0].heads * self.blocks[0].Dh, device=dev)
 
     def gen_step(self, tok, h):
-        x = self.embed(tok) + self.pe[0]                # (B, E)
-        x = self.proj(x)                                 # (B, D)
+        """Full-context generation: attend over all tokens so far.
+        tok: (L, B), h: (B, D) unused — kept for API compat."""
+        L, B = tok.shape
+        x = self.embed(tok) + self.pe[:L].unsqueeze(1)
+        x = self.proj(x)
         for blk in self.blocks:
-            x, h = blk.step(x, h)
-        return self.fc(self.norm(x)), h                 # (B, V)
+            x = blk(x)
+        x = self.norm(x)
+        h_new = x[-1]                                        # update recurrent state
+        return self.fc(x[-1]), h_new                       # (B, V)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -244,7 +193,7 @@ def train(steps=8000, lr=2e-3, B=32, print_every=300):
             torch.save({"model_state": model.state_dict(),
                        "optimizer_state": opt.state_dict(),
                        "step": s, "c2i": c2i, "i2c": i2c}, CKPT)
-            print(f"💾 ckpt step {s}")
+            print(f"saved step {s}")
 
     return model
 
@@ -271,7 +220,7 @@ def generate(model, prompt, max_new=15, temp=0.9, rep=2.5):
     result = list(prompt)
     for _ in range(max_new):
         with torch.no_grad():
-            logits, h = model.gen_step(tok[-1:], h)
+            logits, h = model.gen_step(tok, h)
             p = F.softmax(logits / temp, dim=-1).squeeze(0)
             for c in set(result[-5:]):
                 i = c2i.get(c, -1)
@@ -300,9 +249,9 @@ def traverse(model, a, b, steps=10):
         al = i/steps
         z = z1*(1-al) + z2*al
         p = F.softmax(model.fc(z), dim=-1)
-        c = i2c.get(p.argmax().item(), "·")
+        c = i2c.get(p.argmax().item(), ".")
         conf = p.max().item()
-        print(f"  α={al:4.1f}  '{c}'  conf={conf:.3f}  {'█'*int(conf*20)}")
+        print(f"  alpha={al:.2f}  '{c}'  conf={conf:.3f}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -310,7 +259,7 @@ def traverse(model, a, b, steps=10):
 # ══════════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     print("="*60)
-    print("Curve v3 — Transformer + Large Corpus")
+    print("Curve v3 — Transformer + REAL GPT2 Corpus")
     print(f"Corpus: {len(CORPUS)} sentences, vocab={VOCAB}")
     print("="*60)
     model = train(steps=8000, lr=2e-3, B=32, print_every=300)
@@ -318,11 +267,11 @@ if __name__ == "__main__":
     print("\n=== Generation ===")
     for p in ["今天天气","我爱","宇宙","健康","人工智能"]:
         g = generate(model, p, rep=2.5)
-        print(f"  '{p}' → '{g}'")
+        print(f"  '{p}' -> '{g}'")
 
     print("\n=== Interpolation ===")
     traverse(model, "今天", "未来")
 
     torch.save({"model_state": model.state_dict(), "c2i": c2i, "i2c": i2c},
                "E:/claude/myllm/model_v3.pt")
-    print("\n✅ Saved → model_v3.pt")
+    print("\nSaved -> model_v3.pt")
