@@ -232,7 +232,9 @@ gate = sigmoid(q)  # q 只依赖当前 token 的 embedding
 
 标准 transformer 需要 KV cache 是因为架构没有显式记忆，每一步都回头看所有历史。如果固定大小的状态 h 能编码生成所需的上下文，那么 O(L) 的 KV cache 只是一个工程 hack，不是架构进步。
 
-**这个方向的隐含结论很炸裂**：整个 LLM 推理基础设施都在围绕 KV cache 做优化 — PagedAttention、KV cache 量化、cache 调度、显存管理…… 如果状态模型真的 work，这些东西全部不需要了。推理成本从 O(L²) 降到 O(L)，而且没有上下文窗口硬上限。这指向一个更深层的问题：**你真的需要记住所有过去才能生成下一个 token 吗？**
+**这个方向的隐含结论很炸裂**：整个 LLM 推理基础设施都在围绕 KV cache 做优化 — PagedAttention、KV cache 量化、cache 调度、显存管理…… 如果状态模型真的 work，这些东西全部不需要了。推理成本从 O(L²) 降到 O(L)，而且没有上下文窗口硬上限。
+
+不止如此。**状态模型的每步推理是真正的 O(1)** — `step()` 的矩阵乘法量是固定的，不管前面生成了一百个字还是一百万字。标准 transformer 即使有 KV cache，每步仍然需要做 attention 读取（O(L) 读取 + 计算），只是省了重复编码。而状态模型从计算到读取都是常数时间。这意味着：局部稳定生成不只是省显存，推理速度本身也会极大提升。这指向一个更深层的问题：**你真的需要记住所有过去才能生成下一个 token 吗？**
 
 **2. 大部分场景的瓶颈是局部一致，不是长上下文**
 
@@ -490,7 +492,9 @@ Beyond the theory, the architecture suggests several practical observations:
 
 Standard transformers need KV cache because the architecture has no explicit memory — every step must look back at the full history. If a fixed-size state h can encode the context needed for generation, then O(L) KV cache is an engineering hack, not an architectural advance.
 
-**The implication is explosive**: the entire LLM inference infrastructure is built around KV cache optimization — PagedAttention, KV cache quantization, cache scheduling, memory management. If state-based models actually work, none of it is needed. Inference cost drops from O(L²) to O(L), with no hard context window limit. This raises a deeper question: **do you really need to remember everything to generate the next token?**
+**The implication is explosive**: the entire LLM inference infrastructure is built around KV cache optimization — PagedAttention, KV cache quantization, cache scheduling, memory management. If state-based models actually work, none of it is needed. Inference cost drops from O(L²) to O(L), with no hard context window limit.
+
+Better yet: **each `step()` is truly O(1)** — the matrix multiply cost is fixed regardless of whether you've generated 100 tokens or 1 million. Even with KV cache, a standard transformer still does O(L) attention reads per step. A state model reads and computes in constant time. This means: local stability doesn't just save memory — inference speed itself improves dramatically. This raises a deeper question: **do you really need to remember everything to generate the next token?**
 
 **2. Most real-world bottlenecks are local coherence, not long context**
 
