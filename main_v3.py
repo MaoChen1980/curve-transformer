@@ -15,6 +15,10 @@ import os, getpass
 os.environ.setdefault("USERNAME", "user")
 os.environ.setdefault("USER", "user")
 
+# Disable torch.compile/JIT to avoid hard-coded vocab-size shapes.
+os.environ["PYTORCH_JIT"] = "0"
+os.environ["TORCH_COMPILE_DISABLE"] = "1"
+
 import random, math, torch, torch.nn as nn, torch.nn.functional as F
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. Data — load REAL corpus from GPT2-distil-chinese
@@ -121,12 +125,15 @@ class CurveTransformer(nn.Module):
         self.fc = nn.Linear(D, vocab)
 
     def encode(self, tok):
-        """tok: (L, B) → h: (L, B, D)"""
+        """tok: (L,) or (L, B) or (B, L) → always returns (L, B, D)."""
+        if tok.dim() == 1:
+            tok = tok.unsqueeze(1)   # (L,) → (L, B=1)
+        elif tok.size(0) == 1:
+            tok = tok.T               # (B=1, L) → (L, B=1)
         L, B = tok.shape
-        x = self.embed(tok) + self.pe[:L].unsqueeze(1)   # (L, B, E)
-        x = self.proj(x)                                  # (L, B, D)
-        for blk in self.blocks:
-            x = blk(x)
+        x = self.embed(tok) + self.pe[:L].unsqueeze(1)
+        x = self.proj(x)
+        for blk in self.blocks: x = blk(x)
         return self.norm(x)
 
     def forward(self, tok):
@@ -138,15 +145,25 @@ class CurveTransformer(nn.Module):
 
     def gen_step(self, tok, h):
         """Full-context generation: attend over all tokens so far.
-        tok: (L, B), h: (B, D) unused — kept for API compat."""
+        tok: (L,) or (B, L) → returns (B, V), h_new: (D,)"""
+        if tok.dim() == 1: tok = tok.unsqueeze(0)  # (L,) → (B=1, L)
+        elif tok.size(0) > 1 and tok.size(-1) > 1 and tok.dim() == 2 and tok.shape[0] > tok.shape[-1]:
+            tok = tok.T                             # (B, L) where B>L? → swap
         L, B = tok.shape
         x = self.embed(tok) + self.pe[:L].unsqueeze(1)
         x = self.proj(x)
-        for blk in self.blocks:
-            x = blk(x)
+        for blk in self.blocks: x = blk(x)
         x = self.norm(x)
-        h_new = x[-1]                                        # update recurrent state
-        return self.fc(x[-1]), h_new                       # (B, V)
+        h_new = x[-1, 0]                            # always (D,) — last pos, first batch
+        return self.fc(h_new), h_new                # (B, V) = (1, V)
+
+    def safe_logits(self, logits):
+        """Clamp logits so token IDs >= VOCAB can't be selected."""
+        # OOV tokens get -inf so they are never argmax'd
+        vocab = self.fc.out_features
+        mask = torch.zeros_like(logits)
+        mask[..., :vocab] = 1.0
+        return logits * mask + (-1e9) * (1.0 - mask)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -154,7 +171,7 @@ class CurveTransformer(nn.Module):
 # ══════════════════════════════════════════════════════════════════════════════
 CKPT = "E:/claude/myllm/checkpoint_v3.pt"
 
-def train(steps=8000, lr=2e-3, B=32, print_every=300):
+def train(steps=2500, lr=3e-3, B=64, print_every=200, early_stop=0.01):
     dev = torch.device("cpu")
     model = CurveTransformer(VOCAB, E=64, D=256, n_layers=2, heads=4).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
@@ -186,15 +203,21 @@ def train(steps=8000, lr=2e-3, B=32, print_every=300):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
         opt.step()
 
-        if s % print_every == 0:
-            print(f"step {s:5d} | loss {loss.item():.4f}")
-
         if s > 0 and s % 500 == 0:
             torch.save({"model_state": model.state_dict(),
                        "optimizer_state": opt.state_dict(),
                        "step": s, "c2i": c2i, "i2c": i2c}, CKPT)
             print(f"saved step {s}")
 
+        if s % print_every == 0:
+            print(f"step {s:5d} | loss {loss.item():.4f}")
+            if loss.item() < early_stop:
+                print(f"Converged at step {s} (loss < {early_stop}), stopping early.")
+                torch.save({"model_state": model.state_dict(),
+                           "optimizer_state": opt.state_dict(),
+                           "step": s, "c2i": c2i, "i2c": i2c}, CKPT)
+                print(f"saved step {s}")
+                break
     return model
 
 
@@ -206,25 +229,21 @@ def generate(model, prompt, max_new=15, temp=0.9, rep=2.5):
     model.eval()
     tok = torch.tensor([c2i.get(c,1) for c in prompt], dtype=torch.long).to(dev)
 
-    # Encode prompt: embed → proj → blocks → norm
     with torch.no_grad():
-        L = tok.size(0)
-        x = model.embed(tok.unsqueeze(1)) + model.pe[:L].unsqueeze(1)
-        x = model.proj(x)
-        for blk in model.blocks:
-            x = blk(x)
-        x = model.norm(x)
-        # h: last position, last block, (D,)
-        h = x[-1, 0]    # (D,)
+        x = model.encode(tok)
+        h = x[-1, 0]  # (D,) — last position embedding
 
     result = list(prompt)
     for _ in range(max_new):
         with torch.no_grad():
             logits, h = model.gen_step(tok, h)
-            p = F.softmax(logits / temp, dim=-1).squeeze(0)
-            for c in set(result[-5:]):
+            logits = model.safe_logits(logits)
+            p = F.softmax(logits / temp, dim=-1)
+            if p.dim() > 1: p = p[0]          # take batch 0, flatten
+            p = p.clone()                     # avoid in-place on view
+            for c in set(result[-5:]):        # repetition penalty
                 i = c2i.get(c, -1)
-                if i >= 0: p[i] = p[i] ** 0.7
+                if 0 <= i < len(p): p[i] = p[i] ** 0.3
             nxt = p.argmax().item()
         if nxt == 0: break
         result.append(i2c.get(nxt, ""))
@@ -262,7 +281,7 @@ if __name__ == "__main__":
     print("Curve v3 — Transformer + REAL GPT2 Corpus")
     print(f"Corpus: {len(CORPUS)} sentences, vocab={VOCAB}")
     print("="*60)
-    model = train(steps=8000, lr=2e-3, B=32, print_every=300)
+    model = train(steps=2500, lr=3e-3, B=64, print_every=200, early_stop=0.01)
 
     print("\n=== Generation ===")
     for p in ["今天天气","我爱","宇宙","健康","人工智能"]:
