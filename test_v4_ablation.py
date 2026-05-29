@@ -11,6 +11,7 @@ HAS_A = 'A' in VARIANT
 HAS_B = 'B' in VARIANT
 HAS_C = 'C' in VARIANT
 HAS_D = 'D' in VARIANT
+HAS_E = 'E' in VARIANT
 
 CKPT = f"E:/claude/myllm/model_v4_ablation_{VARIANT}.pt"
 if not os.path.exists(CKPT):
@@ -34,7 +35,9 @@ class Block(nn.Module):
         if HAS_B: self.hp = nn.Linear(D, D)
         if HAS_C:
             self.cq = nn.Linear(D, D); self.ck = nn.Linear(D, D); self.cv = nn.Linear(D, D)
-        if HAS_D:
+        if HAS_E:
+            self.h_proj = nn.Linear(D, D); self.gru = nn.GRUCell(D * 2, D)
+        elif HAS_D:
             self.gru_fast = nn.GRUCell(D, D); self.gru_slow = nn.GRUCell(D, D)
         else: self.gru = nn.GRUCell(D, D)
 
@@ -56,7 +59,10 @@ class Block(nn.Module):
             q = self.cq(xn).unsqueeze(0); k = self.ck(buf); v = self.cv(buf)
             a = F.softmax(torch.matmul(q, k.transpose(-2,-1))/math.sqrt(D), dim=-1)
             xn = xn + (a * v).sum(dim=0)
-        if HAS_D:
+        if HAS_E:
+            h_context = self.h_proj(h)
+            h_new = self.gru(torch.cat([xn, h_context], dim=-1), h)
+        elif HAS_D:
             h_fast = self.gru_fast(xn, h)
             if h_slow is None: h_slow = torch.zeros_like(h)
             h_slow_new = self.gru_slow(h_fast, h_slow)

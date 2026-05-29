@@ -9,7 +9,7 @@ import torch, torch.nn as nn, torch.nn.functional as F
 
 # ─── Config ──────────────────────────────────────────────
 VARIANT = os.environ.get("VARIANT", "base")
-# Options: base A B C D AC ABC ABCD
+# Options: base A B C D AC ABC ABCD E
 
 POETRY_DIR = "E:/claude/myllm/corpora/tang_poetry/"
 CKPT     = f"E:/claude/myllm/checkpoint_v4_ablation_{VARIANT}.pt"
@@ -19,6 +19,7 @@ HAS_A = 'A' in VARIANT
 HAS_B = 'B' in VARIANT
 HAS_C = 'C' in VARIANT
 HAS_D = 'D' in VARIANT
+HAS_E = 'E' in VARIANT
 
 # ─── Data ────────────────────────────────────────────────
 def load_poetry():
@@ -67,8 +68,12 @@ class Block(nn.Module):
             self.ck = nn.Linear(D, D)
             self.cv = nn.Linear(D, D)
 
+        # E: explicit h in GRU input — cat(xn, h_proj(h)) instead of xn
+        if HAS_E:
+            self.h_proj = nn.Linear(D, D)
+            self.gru = nn.GRUCell(D * 2, D)
         # D: dual-scale — fast GRU + slow GRU
-        if HAS_D:
+        elif HAS_D:
             self.gru_fast = nn.GRUCell(D, D)
             self.gru_slow = nn.GRUCell(D, D)
             self.slow_interval = 3
@@ -98,7 +103,10 @@ class Block(nn.Module):
             a = F.softmax(s, dim=-1)
             xn = xn + (a * v).sum(dim=0)
 
-        if HAS_D:
+        if HAS_E:
+            h_context = self.h_proj(h)
+            h_new = self.gru(torch.cat([xn, h_context], dim=-1), h)
+        elif HAS_D:
             h_fast = self.gru_fast(xn, h)
             if h_slow is None:
                 h_slow = torch.zeros_like(h)
